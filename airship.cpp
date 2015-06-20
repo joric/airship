@@ -1,4 +1,4 @@
-// (c) 2013 joric^proxium
+#define _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,13 +6,37 @@
 #include <gdiplus.h>
 #include <shlwapi.h>
 #include <time.h>
+#include <wtsapi32.h>
 
 #pragma comment(lib, "gdiplus")
 #pragma comment(lib, "shlwapi")
 #pragma comment( linker, "/subsystem:windows" )
 
-struct Conf_t {
+#define WS_EX_NOACTIVATE 0x08000000L
+#define WS_EX_LAYERED 0x00080000
+#define ULW_ALPHA 0x00000002
+
+typedef BOOL(WINAPI * PFN_UpdateLayeredWindow) (HWND, HDC, POINT *, SIZE *, HDC, POINT *, COLORREF, BLENDFUNCTION *, DWORD);
+PFN_UpdateLayeredWindow UpdateLayeredWindow;
+
+#define NOTIFY_FOR_THIS_SESSION 0
+#define WM_WTSSESSION_CHANGE 0x02B1
+#define WTS_SESSION_LOCK	0x7
+#define WTS_SESSION_UNLOCK	0x8
+
+ULONG_PTR g_gdiplusToken;
+Gdiplus::Image * g_pImg = NULL;
+HBITMAP g_hBmp[16];
+
+char g_szConfigFile[MAX_PATH];
+char g_szImage[MAX_PATH];
+char g_szLink[MAX_PATH];
+char g_szBuf[MAX_PATH];
+
+struct conf_t {
 	int frames;
+	int animframes;
+	int animtime;
 	int speed;
 	int autoclose;
 	int blocked;
@@ -21,70 +45,55 @@ struct Conf_t {
 	int randomize;
 	int delay;
 	int pause;
-	int repeat;
+	int awake;
+	int draggable;
 	const char *image;
 	const char *link;
+	time_t launch;
+	time_t expire;
 };
 
-struct View_t {
-	Gdiplus::Image * pImg;
+struct view_t {
 	int x, y;
 	int w, h;
 	int step;
-	int wait;
 	int mx, my;
 	int mx0, my0;
-	int xmax, ymax;
+	int sw, sh;
+	int frame;
 	bool captured;
 	bool pressed;
+	bool frozen;
+	bool screensaver;
+	bool lockscreen;
+	bool paused;
+	DWORD ms;
+	DWORD starttime;
+	DWORD frametime;
 	RECT rc;
 	POINT pt, pt0;
 	HDC hdcScreen;
 	HDC hDC;
 	HBITMAP hOldDC;
-	HBITMAP hBmp[16];
+	HWND hWnd;
 };
 
-Conf_t conf;
-View_t view;
-
-char g_szConfigFile[MAX_PATH];
-char g_szImage[MAX_PATH];
-char g_szLink[MAX_PATH];
-
-#ifndef UpdateLayeredWindow
-typedef BOOL(WINAPI * PFN_UpdateLayeredWindow) (HWND, HDC, POINT *, SIZE *, HDC, POINT *, COLORREF, BLENDFUNCTION *, DWORD);
-PFN_UpdateLayeredWindow UpdateLayeredWindow;
-#endif
-
-#ifndef WS_EX_LAYERED
-#define WS_EX_LAYERED 0x00080000
-#endif
-
-#ifndef ULW_ALPHA
-#define ULW_ALPHA 0x00000002
-#endif
-
-#ifndef WS_EX_NOACTIVATE
-#define WS_EX_NOACTIVATE 0x08000000L
-#endif
-
-#ifndef USER_TIMER_MINIMUM
-#define USER_TIMER_MINIMUM 0x0000000A
-#endif
-
-ULONG_PTR g_gdiplusToken;
+conf_t conf;
+view_t view;
 
 Gdiplus::Image * LoadImg(const char *szFile)
 {
 	Gdiplus::Image * pImage;
 	Gdiplus::GdiplusStartupInput gdiplusStartupInput;
 	Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
+
 	wchar_t mb[MAX_PATH];
-	MultiByteToWideChar(CP_ACP, 0, szFile, strlen(szFile), mb, MAX_PATH);
+	mbstowcs(mb, szFile, MAX_PATH);
 	pImage = new Gdiplus::Image(mb);
+
 	if (Gdiplus::Ok == pImage->GetLastStatus())
 		return pImage;
+
 	return NULL;
 }
 
@@ -99,21 +108,164 @@ HRESULT DrawImg(Gdiplus::Image * pImage, HDC hdc, int x, int y)
 	return E_UNEXPECTED;
 }
 
-void SetFrame(HWND hWnd, int i)
+void UpdateFrame()
 {
-	if (i > conf.frames)
-		i = 0;
+	int side = view.step > 0 ? 0 : 1;
+
+	int frame = side * conf.animframes + view.frame;
 
 	if (view.hOldDC)
 		SelectObject(view.hDC, view.hOldDC);
 
-	view.hOldDC = (HBITMAP) SelectObject(view.hDC, view.hBmp[i]);
+	view.hOldDC = (HBITMAP) SelectObject(view.hDC, g_hBmp[frame % conf.frames]);
 
 	BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 	POINT ptPos = { 0, 0 };
 	POINT ptSrc = { 0, 0 };
 	SIZE sizeWnd = { view.w, view.h };
-	UpdateLayeredWindow(hWnd, view.hdcScreen, &ptPos, &sizeWnd, view.hDC, &ptSrc, 0, &blend, ULW_ALPHA);
+	UpdateLayeredWindow(view.hWnd, view.hdcScreen, &ptPos, &sizeWnd, view.hDC, &ptSrc, 0, &blend, ULW_ALPHA);
+}
+
+int ClampValue(int x, int a, int b)
+{
+	return x < a ? a : x > b ? b : x;
+}
+
+int RandomValue(int a, int b)
+{
+	return (int)(a + ((b - a) * rand() / RAND_MAX));
+}
+
+void Reset()
+{
+	view.step = 1;
+	view.x = -view.w;
+	if (conf.randomize)
+		view.y = RandomValue(view.sh * conf.top / 100, view.sh * conf.bottom / 100);
+	SetWindowPos(view.hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void DelayedStart(DWORD delay)
+{
+	view.paused = delay > 0;
+	view.starttime = GetTickCount() + delay;
+	Reset();
+	if (view.paused)
+	{
+		ShowWindow(view.hWnd, SW_HIDE);
+	}
+	else
+	{
+		ShowWindow(view.hWnd, SW_SHOWNOACTIVATE);
+		SetWindowPos(view.hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
+}
+
+bool CheckScreensaver()
+{
+	BOOL bRunning = false;
+	int bResult = SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, &bRunning, 0);
+
+	if (!bRunning)
+	{
+		if (view.screensaver)
+		{
+			view.screensaver = false;
+			//MessageBox(NULL, "Screensaver Stopped", NULL, MB_OK);
+			return true;
+		}
+	}
+	else
+	{
+		view.screensaver = true;
+	}
+
+	return false;
+}
+
+bool CheckExpiration()
+{
+	time_t t;
+	time(&t);
+
+	bool bExpired = conf.expire > 0 && t > conf.expire;
+	if (bExpired)
+		return true;
+
+	bool bFrozen = (conf.launch > 0 && t < conf.launch);
+
+	if (bFrozen)
+	{
+		if (!view.frozen)
+		{
+			view.frozen = true;
+			ShowWindow(view.hWnd, SW_HIDE);
+		}
+	}
+	else
+	{
+		if (view.frozen)
+		{
+			view.frozen = false;
+			DelayedStart(0);
+		}
+	}
+	return false;
+}
+
+void Update()
+{
+	view.ms = GetTickCount();
+
+	if (CheckExpiration())
+		PostQuitMessage(0);
+
+	if (CheckScreensaver())
+		DelayedStart(conf.awake);
+
+	if (view.ms >= view.starttime && view.paused)
+	{
+		view.paused = false;
+		Reset();
+		ShowWindow(view.hWnd, SW_SHOWNOACTIVATE);
+	}
+
+	if (!view.paused && !view.frozen)
+	{
+		if (view.ms > view.frametime)
+		{
+			view.frame++;
+
+			if (view.frame >= conf.animframes)
+				view.frame = 0;
+
+			view.frametime = view.ms + conf.animtime;
+			UpdateFrame();
+		}
+
+		if (!view.captured)
+		{
+			view.x += conf.speed * view.step;
+
+			if (view.x < -view.w || view.x > view.sw)
+			{
+				view.step *= -1;
+				UpdateFrame();	// forceably update on corners
+
+				if (conf.randomize)
+					view.y = RandomValue(view.sh * conf.top / 100, view.sh * conf.bottom / 100);
+
+				if (view.step > 0)	// got to the left edge, the end
+				{
+					DelayedStart(conf.pause);
+					return;
+				}
+			}
+
+			view.y = ClampValue(view.y, 0, view.sh - view.h);
+			SetWindowPos(view.hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+	}
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -121,6 +273,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	POINT pt;
 	switch (message)
 	{
+		case WM_WTSSESSION_CHANGE:
+			switch (wParam)
+			{
+				case WTS_SESSION_LOCK:
+					view.lockscreen = true;
+					break;
+				case WTS_SESSION_UNLOCK:
+					if (view.lockscreen)
+					{
+						view.lockscreen = false;
+						DelayedStart(conf.awake);
+					}
+					break;
+			}
+			break;
+
 		case WM_SYSKEYDOWN:
 			if (wParam == VK_F4)
 				if (!conf.blocked)
@@ -133,52 +301,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 			view.hdcScreen = GetDC(NULL);
 			view.hDC = CreateCompatibleDC(view.hdcScreen);
+
+			int w = g_pImg->GetWidth();
+			int h = g_pImg->GetHeight() / conf.frames;
+
 			for (int i = 0; i < conf.frames; i++)
 			{
-				view.hBmp[i] = CreateCompatibleBitmap(view.hdcScreen, view.w, view.h);
-				view.hOldDC = (HBITMAP) SelectObject(view.hDC, view.hBmp[i]);
-				DrawImg(view.pImg, view.hDC, 0, -view.h * i);
+				g_hBmp[i] = CreateCompatibleBitmap(view.hdcScreen, view.w, view.h);
+				view.hOldDC = (HBITMAP) SelectObject(view.hDC, g_hBmp[i]);
+				DrawImg(g_pImg, view.hDC, 0, -h * i);
 				SelectObject(view.hDC, view.hOldDC);
 			}
-			SetFrame(hWnd, view.step > 0 ? 0 : 1);
+			view.hOldDC = NULL;
 			break;
 		}
 
 		case WM_TIMER:
-			if (wParam==1)
-			{
-				view.wait = 0;
-				KillTimer ( hWnd, 1 );
-
-				if ( conf.randomize )
-				{
-					float r = (float)rand()/(float)RAND_MAX;
-					int y0 = view.ymax * conf.top / 100;
-					int y1 = view.ymax * conf.bottom / 100;
-					view.y = y0 + (int)((y1-y0) * r);
-				}
-			} 
-			else if (view.wait==0 && !view.captured)
-			{
-				view.x += conf.speed * view.step;
-
-				if (view.x < -view.w || view.x > view.xmax)
-				{
-					view.wait = (view.step<0 ? conf.repeat : conf.pause);
-					SetTimer(hWnd, 1, view.wait, NULL);
-
-					view.step *= -1;
-					SetFrame(hWnd, view.step > 0 ? 0 : 1);
-				}
-
-				view.y = view.y < 0 ? 0 : view.y > view.ymax - view.h ? view.ymax - view.h : view.y;
-				SetWindowPos(hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
-				SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-			}
+			Update();
 			break;
 
 		case WM_DESTROY:
 			PostQuitMessage(0);
+			break;
+
+		case WM_LBUTTONDOWN:
+			GetCursorPos(&view.pt0);
+			view.pressed = true;
+			view.mx0 = view.mx;
+			view.my0 = view.my;
+
+			if (conf.draggable && !view.captured)
+			{
+				WINDOWPLACEMENT wp;
+				GetWindowPlacement(hWnd, &wp);
+				if (wp.showCmd != SW_MAXIMIZE)
+				{
+					GetWindowRect(hWnd, &view.rc);
+					SetCapture(hWnd);
+					view.captured = true;
+					view.pt.x = view.mx;
+					view.pt.y = view.my;
+					ClientToScreen(hWnd, &view.pt);
+				}
+			}
 			break;
 
 		case WM_MOUSEMOVE:
@@ -195,11 +360,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				view.y = view.rc.top + pt.y - view.pt.y;
 				SetWindowPos(hWnd, NULL, view.x, view.y, view.w, view.h, SWP_SHOWWINDOW);
 			}
-
 			break;
 
 		case WM_LBUTTONUP:
 			GetCursorPos(&pt);
+			view.pressed = false;
+
 			if (pt.x == view.pt0.x && pt.y == view.pt0.y)
 			{
 				ShellExecute(NULL, "open", conf.link, NULL, NULL, SW_SHOW);
@@ -207,7 +373,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					PostQuitMessage(0);
 			}
 
-			view.pressed = false;
 			if (view.captured)
 			{
 				ReleaseCapture();
@@ -215,27 +380,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			}
 			break;
 
-		case WM_LBUTTONDOWN:
-			GetCursorPos(&view.pt0);
-			view.pressed = true;
-			view.mx0 = view.mx;
-			view.my0 = view.my;
-
-			if (!view.captured)
-			{
-				WINDOWPLACEMENT wp;
-				GetWindowPlacement(hWnd, &wp);
-				if (wp.showCmd != SW_MAXIMIZE)
-				{
-					GetWindowRect(hWnd, &view.rc);
-					SetCapture(hWnd);
-					view.captured = true;
-					view.pt.x = view.mx;
-					view.pt.y = view.my;
-					ClientToScreen(hWnd, &view.pt);
-				}
-			}
-			break;
 		default:
 			return DefWindowProc(hWnd, message, wParam, lParam);
 			break;
@@ -255,11 +399,29 @@ const char *getStr(const char *szKey, const char *szDef, char *szBuf, int iSize)
 	return GetPrivateProfileString("config", szKey, szDef, szBuf, iSize, g_szConfigFile) ? szBuf : szDef;
 }
 
+time_t getTime(const char *szKey, const char *szDef, char *szBuf, int iSize)
+{
+	const char *szTime = GetPrivateProfileString("config", szKey, szDef, szBuf, iSize, g_szConfigFile) ? szBuf : szDef;
+	int Y, M, D, h, m, s;
+	int res = sscanf(szTime, "%04d-%02d-%02d %02d:%02d:%02d", &Y, &M, &D, &h, &m, &s);
+	struct tm tmv = { s, m, h, D, M - 1, Y - 1900, -1, -1, -1 };
+	return mktime(&tmv);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+	if (FindWindow("airshipclass", NULL))
+	{
+		MessageBox(NULL, "Already runnning!", "Error", MB_OK);
+		return 0;
+	}
+
+	HMODULE hUser32Dll =::GetModuleHandle("user32.dll");
+	UpdateLayeredWindow = (PFN_UpdateLayeredWindow)::GetProcAddress(hUser32Dll, "UpdateLayeredWindow");
+
 	LARGE_INTEGER q;
 	QueryPerformanceCounter(&q);
-	srand ((unsigned int)q.QuadPart);
+	srand((unsigned int)q.QuadPart);
 
 	GetModuleFileName(NULL, g_szConfigFile, MAX_PATH);
 	PathRenameExtension(g_szConfigFile, ".ini");
@@ -269,6 +431,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	PathRemoveFileSpec(szCurrentDir);
 	SetCurrentDirectory(szCurrentDir);
 
+	conf.image = getStr("image", "airship.png", g_szImage, MAX_PATH);
+	conf.link = getStr("link", "https://en.wikipedia.org/wiki/Airship", g_szLink, MAX_PATH);
 	conf.frames = getInt("frames", 2);
 	conf.speed = getInt("speed", 1);
 	conf.autoclose = getInt("autoclose", 0);
@@ -278,25 +442,36 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	conf.blocked = getInt("blocked", 0);
 	conf.delay = getInt("delay", 0);
 	conf.pause = getInt("pause", 0);
-	conf.repeat = getInt("repeat", 0);
-	conf.image = getStr("image", "airship.png", g_szImage, MAX_PATH);
-	conf.link = getStr("link", "https://en.wikipedia.org/wiki/Airship", g_szLink, MAX_PATH);
+	conf.awake = getInt("awake", 1000);
+	conf.draggable = getInt("draggable", 1);
+	conf.animframes = getInt("animframes", 1);
+	conf.animtime = getInt("animtime", 250);
+	conf.launch = getTime("launch", "2001-01-01 00:00:00", g_szBuf, MAX_PATH);
+	conf.expire = getTime("expire", "2024-01-01 00:00:00", g_szBuf, MAX_PATH);
 
-	view.step = 1;
-	view.hOldDC = NULL;
-
-	view.pImg = LoadImg(conf.image);
-	if (!view.pImg)
+	g_pImg = LoadImg(conf.image);
+	if (!g_pImg)
 	{
 		MessageBox(NULL, "Could not load image", conf.image, MB_OK);
 		return 0;
 	}
 
-	view.w = view.pImg->GetWidth();
-	view.h = view.pImg->GetHeight() / conf.frames;
-
-	HMODULE hUser32Dll =::GetModuleHandle("user32.dll");
-	UpdateLayeredWindow = (PFN_UpdateLayeredWindow)::GetProcAddress(hUser32Dll, "UpdateLayeredWindow");
+	view.w = g_pImg->GetWidth();
+	view.h = g_pImg->GetHeight() / conf.frames;
+	view.step = 1;
+	view.hOldDC = NULL;
+	view.frozen = false;
+	view.screensaver = false;
+	view.lockscreen = false;
+	view.frame = 0;
+	view.sw = GetSystemMetrics(SM_CXSCREEN);
+	view.sh = GetSystemMetrics(SM_CYSCREEN);
+	view.ms = GetTickCount();
+	view.frametime = view.ms;
+	view.starttime = view.ms;
+	view.paused = true;
+	view.x = view.sw / 2;
+	view.y = view.sh * (conf.top + (conf.bottom - conf.top) / 2) / 100;
 
 	MSG msg;
 	HWND hWnd;
@@ -306,7 +481,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.lpfnWndProc = (WNDPROC) WndProc;
 	wc.hInstance = GetModuleHandle(NULL);
 	wc.hbrBackground = (HBRUSH) (COLOR_WINDOW + 1);
-	wc.lpszClassName = "main";
+	wc.lpszClassName = "airshipclass";
 	wc.hCursor = LoadCursor(NULL, IDC_HAND);
 	wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
 	wc.lpszMenuName = NULL;
@@ -321,33 +496,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		return 0;
 	}
 
-	view.wait = conf.delay;
-	SetTimer(hWnd, 1, view.wait, NULL);
-	SetTimer(hWnd, 0, USER_TIMER_MINIMUM, NULL);
+	view.hWnd = hWnd;
 
-	RECT rc;
+	HINSTANCE handle =::LoadLibrary("wtsapi32.dll");
+	typedef DWORD(WINAPI * tWTSRegisterSessionNotification) (HWND, DWORD);
+	tWTSRegisterSessionNotification pWTSRegisterSessionNotification = 0;
+	pWTSRegisterSessionNotification = (tWTSRegisterSessionNotification)::GetProcAddress(handle, "WTSRegisterSessionNotification");
+	if (pWTSRegisterSessionNotification)
+		pWTSRegisterSessionNotification(hWnd, NOTIFY_FOR_THIS_SESSION);
+	::FreeLibrary(handle);
 
-	SetRect(&rc, 0, 0, view.w, view.h);
+	DelayedStart(conf.delay);
 
-	view.w = rc.right - rc.left;
-	view.h = rc.bottom - rc.top;
-
-	view.xmax = GetSystemMetrics(SM_CXSCREEN);
-	view.ymax = GetSystemMetrics(SM_CYSCREEN);
-	view.x = -view.w;
-	view.y = view.ymax * (conf.top + (conf.bottom-conf.top)/2 ) / 100;
-
-	AdjustWindowRectEx(&rc, GetWindowLong(hWnd, GWL_STYLE), GetMenu(hWnd) != NULL, GetWindowLong(hWnd, GWL_EXSTYLE));
-
-	SetWindowPos(hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
-
-	ShowWindow(hWnd, SW_SHOWNOACTIVATE);
-	UpdateWindow(hWnd);
+	SetTimer(hWnd, 0, 0, NULL);
 
 	while (GetMessage(&msg, NULL, 0, 0))
 	{
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);
 	}
+
 	return (int)msg.wParam;
 }
