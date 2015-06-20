@@ -39,6 +39,7 @@ struct conf_t {
 	int animtime;
 	int speed;
 	int autoclose;
+	int autohide;
 	int blocked;
 	int top;
 	int bottom;
@@ -142,7 +143,7 @@ void Reset()
 	view.x = -view.w;
 	if (conf.randomize)
 		view.y = RandomValue(view.sh * conf.top / 100, view.sh * conf.bottom / 100);
-	SetWindowPos(view.hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
+	SetWindowPos(view.hWnd, HWND_TOPMOST, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void DelayedStart(DWORD delay)
@@ -157,7 +158,6 @@ void DelayedStart(DWORD delay)
 	else
 	{
 		ShowWindow(view.hWnd, SW_SHOWNOACTIVATE);
-		SetWindowPos(view.hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	}
 }
 
@@ -263,7 +263,7 @@ void Update()
 			}
 
 			view.y = ClampValue(view.y, 0, view.sh - view.h);
-			SetWindowPos(view.hWnd, NULL, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
+			SetWindowPos(view.hWnd, HWND_TOPMOST, view.x, view.y, view.w, view.h, SWP_NOZORDER | SWP_NOACTIVATE);
 		}
 	}
 }
@@ -273,6 +273,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	POINT pt;
 	switch (message)
 	{
+		case WM_SYSKEYDOWN:
+			if (wParam == VK_F4)
+				if (!conf.blocked)
+					SendMessage(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
+			break;
+
+		case WM_SYSCOMMAND:
+			if (wParam!=SC_MINIMIZE)
+				return DefWindowProc(hWnd, message, wParam, lParam);
+		break;
+
 		case WM_WTSSESSION_CHANGE:
 			switch (wParam)
 			{
@@ -289,16 +300,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			}
 			break;
 
-		case WM_SYSKEYDOWN:
-			if (wParam == VK_F4)
-				if (!conf.blocked)
-					SendMessage(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
-			break;
-
 		case WM_CREATE:
 		{
-			SetWindowLong(hWnd, GWL_EXSTYLE, GetWindowLong(hWnd, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST);
-
 			view.hdcScreen = GetDC(NULL);
 			view.hDC = CreateCompatibleDC(view.hdcScreen);
 
@@ -371,6 +374,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				ShellExecute(NULL, "open", conf.link, NULL, NULL, SW_SHOW);
 				if (conf.autoclose)
 					PostQuitMessage(0);
+				if (conf.autohide)
+					DelayedStart(conf.pause);
 			}
 
 			if (view.captured)
@@ -436,6 +441,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	conf.frames = getInt("frames", 2);
 	conf.speed = getInt("speed", 1);
 	conf.autoclose = getInt("autoclose", 0);
+	conf.autoclose = getInt("autohide", 0);
 	conf.top = getInt("top", 25);
 	conf.bottom = getInt("bottom", 75);
 	conf.randomize = getInt("randomize", 75);
@@ -480,7 +486,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.style = CS_HREDRAW | CS_VREDRAW;
 	wc.lpfnWndProc = (WNDPROC) WndProc;
 	wc.hInstance = GetModuleHandle(NULL);
-	wc.hbrBackground = (HBRUSH) (COLOR_WINDOW + 1);
+	wc.hbrBackground = NULL;//(HBRUSH) (COLOR_WINDOW + 1);
 	wc.lpszClassName = "airshipclass";
 	wc.hCursor = LoadCursor(NULL, IDC_HAND);
 	wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -489,8 +495,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.cbWndExtra = 0;
 
 	RegisterClass(&wc);
-
-	if (!(hWnd = CreateWindow(wc.lpszClassName, wc.lpszClassName, WS_POPUP, 0, 0, view.w, view.h, NULL, NULL, wc.hInstance, NULL)))
+	if (!(hWnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, wc.lpszClassName, WS_POPUP, 0, 0, view.w, view.h, NULL, NULL, wc.hInstance, NULL)))
 	{
 		MessageBox(NULL, "Could not create window", "Error", MB_OK);
 		return 0;
