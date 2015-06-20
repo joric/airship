@@ -441,7 +441,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	conf.frames = getInt("frames", 2);
 	conf.speed = getInt("speed", 1);
 	conf.autoclose = getInt("autoclose", 0);
-	conf.autoclose = getInt("autohide", 0);
+	conf.autohide = getInt("autohide", 0);
 	conf.top = getInt("top", 25);
 	conf.bottom = getInt("bottom", 75);
 	conf.randomize = getInt("randomize", 75);
