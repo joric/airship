@@ -15,8 +15,7 @@
 #define WS_EX_LAYERED 0x00080000
 #endif
 
-#define APPCLASS "airship"
-#define SECTION "config"
+char g_szName[] = "airship";
 
 int *__security_cookie;
 void __fastcall __security_check_cookie(int *_StackCookie)
@@ -25,21 +24,21 @@ void __fastcall __security_check_cookie(int *_StackCookie)
 
 unsigned int seed;
 
-void _srand(unsigned int x)
+void srand(unsigned int x)
 {
     seed = x;
 }
 
-unsigned int _rand()
+int rand()
 {
     seed = 0x343FD * seed + 0x269EC3;
     return (seed >> 0x10) & 0x7FFF;
 }
 
-char *_strrchr(char *s, char c)
+char * strrchr(const char *s, int c)
 {
     char *p;
-    for (p = s + strlen(s); *p != c && p >= s; p--);
+    for (p = (char*)s + strlen(s); *--p != c && p >= s;);
     return p;
 }
 
@@ -83,7 +82,6 @@ char g_szImage[MAX_PATH];
 char g_szLink[MAX_PATH];
 char g_szLaunch[MAX_PATH];
 char g_szExpire[MAX_PATH];
-char g_szBuf[MAX_PATH];
 
 typedef struct {
     int frames;
@@ -120,8 +118,8 @@ typedef struct {
     DWORD ms;
     DWORD starttime;
     DWORD frametime;
-    RECT dc;
-    POINT ps;
+    POINT p;
+    RECT r;
     HDC hDC;
     HBITMAP hOldDC;
     HWND hWnd;
@@ -156,7 +154,7 @@ void UpdateFrame()
 
 int RandomValue(int a, int b)
 {
-    return (int)(a + ((b - a) * _rand() / RAND_MAX));
+    return (int)(a + ((b - a) * rand() / RAND_MAX));
 }
 
 void DelayedStart(DWORD delay)
@@ -307,12 +305,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
 
         case WM_LBUTTONDOWN:
-            GetCursorPos(&view.ps);
+            GetCursorPos(&view.p);
             if (conf.draggable && !view.captured)
             {
                 view.captured = TRUE;
                 SetCapture(hWnd);
-                GetWindowRect(hWnd, &view.dc);
+                GetWindowRect(hWnd, &view.r);
             }
             break;
 
@@ -320,15 +318,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (view.captured)
             {
                 GetCursorPos(&p);
-                view.x = view.dc.left + p.x - view.ps.x;
-                view.y = view.dc.top + p.y - view.ps.y;
+                view.x = view.r.left + p.x - view.p.x;
+                view.y = view.r.top + p.y - view.p.y;
                 SetWindowPos(hWnd, NULL, view.x, view.y, 0, 0, SWP_NOSIZE);
             }
             break;
 
         case WM_LBUTTONUP:
             GetCursorPos(&p);
-            if (p.x == view.ps.x && p.y == view.ps.y)
+            if (p.x == view.p.x && p.y == view.p.y)
             {
                 ShellExecute(NULL, "open", conf.link, NULL, NULL, SW_SHOW);
 
@@ -356,23 +354,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 int getInt(const char *szKey, int iDef)
 {
-    return GetPrivateProfileInt(SECTION, szKey, iDef, g_szConfigFile);
+    return GetPrivateProfileInt("config", szKey, iDef, g_szConfigFile);
 }
 
 const char *getStr(const char *szKey, const char *szDef, char *szBuf, int iSize)
 {
-    return GetPrivateProfileString(SECTION, szKey, szDef, szBuf, iSize, g_szConfigFile) ? szBuf : szDef;
+    return GetPrivateProfileString("config", szKey, szDef, szBuf, iSize, g_szConfigFile) ? szBuf : szDef;
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    HWND hWnd;
     WNDCLASS wc;
     MSG msg;
-    int i;
-    gGraphics *g;
     LARGE_INTEGER q;
     char szPath[MAX_PATH];
     wchar_t wszImage[MAX_PATH];
+    int i;
+    gGraphics *g;
+    gImage *pImage;
 
     HINSTANCE gdiplusDll = LoadLibrary("gdiplus.dll");
     ULONG_PTR gdiplusToken;
@@ -386,28 +386,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     _WTS WTSRegisterSessionNotification = (_WTS) GetProcAddress(LoadLibrary("wtsapi32.dll"), "WTSRegisterSessionNotification");
 
-    gImage *pImage = NULL;
+    GetModuleFileName(NULL, szPath, MAX_PATH);
 
-    HWND hWnd = FindWindow(APPCLASS, NULL);
+    strcpy(g_szConfigFile, szPath);
+    strcpy((char*)strrchr(g_szConfigFile, '.'), ".ini");
+
+    hWnd = FindWindow(g_szName, NULL);
     if (hWnd)
         PostMessage(hWnd, WM_CLOSE, 0, 0);
 
     QueryPerformanceCounter(&q);
-    _srand((unsigned int)q.QuadPart);
-
-    GetModuleFileName(NULL, szPath, MAX_PATH);
-
-    strcpy(g_szConfigFile, szPath);
-    strcpy(_strrchr(g_szConfigFile, '.'), ".ini");
+    srand((unsigned int)q.QuadPart);
 
     if (getInt("autorun", 0))
     {
         HKEY reg_key = 0;
         RegOpenKeyEx(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_ALL_ACCESS, &reg_key);
-        RegSetValueEx(reg_key, APPCLASS, 0, REG_SZ, szPath, MAX_PATH);
+        RegSetValueEx(reg_key, g_szName, 0, REG_SZ, (const BYTE *)szPath, MAX_PATH);
     }
 
-    conf.frames = getInt("frames", 2);
+    conf.frames = getInt("frames", 4);
     conf.speed = getInt("speed", 1);
     conf.autoclose = getInt("autoclose", 0);
     conf.autohide = getInt("autohide", 0);
@@ -419,7 +417,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     conf.pause = getInt("pause", 0);
     conf.awake = getInt("awake", 0);
     conf.draggable = getInt("draggable", 1);
-    conf.animframes = getInt("animframes", 1);
+    conf.animframes = getInt("animframes", 2);
     conf.animtime = getInt("animtime", 250);
 
     conf.image = getStr("image", "airship.png", g_szImage, MAX_PATH);
@@ -435,9 +433,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     _UpdateLayeredWindow = (PFN_UpdateLayeredWindow) GetProcAddress(LoadLibrary("user32.dll"), "UpdateLayeredWindow");
 
-    *(char *)_strrchr(szPath, '\\') = 0;
+    *(char*)strrchr(szPath, '\\') = 0;
     SetCurrentDirectory(szPath);
-
     MultiByteToWideChar(CP_ACP, 0, conf.image, MAX_PATH, wszImage, MAX_PATH);
     GdipLoadImageFromFile(wszImage, &pImage);
     if (!pImage)
@@ -473,14 +470,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     memset(&wc, 0, sizeof(wc));
-    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = (WNDPROC) WndProc;
-    wc.lpszClassName = APPCLASS;
+    wc.lpszClassName = g_szName;
     wc.hCursor = LoadCursor(NULL, IDC_HAND);
 
     RegisterClass(&wc);
 
-    if (hWnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, APPCLASS, APPCLASS, WS_POPUP, 0, 0, view.w, view.h, NULL, NULL, wc.hInstance, NULL))
+    hWnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, g_szName, g_szName, WS_POPUP, 0, 0, view.w, view.h, NULL, NULL, wc.hInstance, NULL);
+
+    if (hWnd)
     {
         view.hWnd = hWnd;
 
