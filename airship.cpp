@@ -8,10 +8,6 @@
 #include <time.h>
 #include <wtsapi32.h>
 
-#pragma comment(lib, "gdiplus")
-#pragma comment(lib, "shlwapi")
-#pragma comment( linker, "/subsystem:windows" )
-
 #define WS_EX_NOACTIVATE 0x08000000L
 #define WS_EX_LAYERED 0x00080000
 #define ULW_ALPHA 0x00000002
@@ -35,19 +31,19 @@ char g_szBuf[MAX_PATH];
 
 struct conf_t {
 	int frames;
-	int animframes;
-	int animtime;
 	int speed;
 	int autoclose;
 	int autohide;
-	int blocked;
 	int top;
 	int bottom;
 	int randomize;
+	int blocked;
 	int delay;
 	int pause;
 	int awake;
 	int draggable;
+	int animframes;
+	int animtime;
 	const char *image;
 	const char *link;
 	time_t launch;
@@ -64,9 +60,9 @@ struct view_t {
 	int frame;
 	bool captured;
 	bool pressed;
-	bool frozen;
 	bool screensaver;
 	bool lockscreen;
+	bool sleeping;
 	bool paused;
 	DWORD ms;
 	DWORD starttime;
@@ -90,6 +86,7 @@ Gdiplus::Image * LoadImg(const char *szFile)
 
 	wchar_t mb[MAX_PATH];
 	mbstowcs(mb, szFile, MAX_PATH);
+
 	pImage = new Gdiplus::Image(mb);
 
 	if (Gdiplus::Ok == pImage->GetLastStatus())
@@ -112,7 +109,6 @@ HRESULT DrawImg(Gdiplus::Image * pImage, HDC hdc, int x, int y)
 void UpdateFrame()
 {
 	int side = view.step > 0 ? 0 : 1;
-
 	int frame = side * conf.animframes + view.frame;
 
 	if (view.hOldDC)
@@ -148,17 +144,11 @@ void Reset()
 
 void DelayedStart(DWORD delay)
 {
-	view.paused = delay > 0;
+	view.paused = true;
 	view.starttime = GetTickCount() + delay;
 	Reset();
-	if (view.paused)
-	{
+	if (delay > 0)
 		ShowWindow(view.hWnd, SW_HIDE);
-	}
-	else
-	{
-		ShowWindow(view.hWnd, SW_SHOWNOACTIVATE);
-	}
 }
 
 bool CheckScreensaver()
@@ -166,50 +156,37 @@ bool CheckScreensaver()
 	BOOL bRunning = false;
 	int bResult = SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, &bRunning, 0);
 
-	if (!bRunning)
+	if (!bRunning && view.screensaver)
 	{
-		if (view.screensaver)
-		{
-			view.screensaver = false;
-			//MessageBox(NULL, "Screensaver Stopped", NULL, MB_OK);
-			return true;
-		}
+		view.screensaver = false;
+		return true;
 	}
-	else
-	{
+
+	if (bRunning)
 		view.screensaver = true;
-	}
 
 	return false;
 }
 
-bool CheckExpiration()
+bool CheckTime()
 {
 	time_t t;
 	time(&t);
+	bool bSleeping = (conf.launch > 0 && t < conf.launch) || (conf.expire > 0 && t > conf.expire);
 
-	bool bExpired = conf.expire > 0 && t > conf.expire;
-	if (bExpired)
+	if (!bSleeping && view.sleeping)
+	{
+		view.sleeping = false;
 		return true;
+	}
 
-	bool bFrozen = (conf.launch > 0 && t < conf.launch);
-
-	if (bFrozen)
+	if (bSleeping)
 	{
-		if (!view.frozen)
-		{
-			view.frozen = true;
+		if (!view.sleeping)
 			ShowWindow(view.hWnd, SW_HIDE);
-		}
+		view.sleeping = true;
 	}
-	else
-	{
-		if (view.frozen)
-		{
-			view.frozen = false;
-			DelayedStart(0);
-		}
-	}
+
 	return false;
 }
 
@@ -217,20 +194,19 @@ void Update()
 {
 	view.ms = GetTickCount();
 
-	if (CheckExpiration())
-		PostQuitMessage(0);
+	if (CheckTime())
+		DelayedStart(conf.delay);
 
 	if (CheckScreensaver())
 		DelayedStart(conf.awake);
 
-	if (view.ms >= view.starttime && view.paused)
+	if (view.starttime >= 0 && view.ms >= view.starttime && view.paused)
 	{
 		view.paused = false;
-		Reset();
 		ShowWindow(view.hWnd, SW_SHOWNOACTIVATE);
 	}
 
-	if (!view.paused && !view.frozen)
+	if (!view.paused && !view.sleeping)
 	{
 		if (view.ms > view.frametime)
 		{
@@ -280,9 +256,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			break;
 
 		case WM_SYSCOMMAND:
-			if (wParam!=SC_MINIMIZE)
+			if (wParam != SC_MINIMIZE)
 				return DefWindowProc(hWnd, message, wParam, lParam);
-		break;
+			break;
 
 		case WM_WTSSESSION_CHANGE:
 			switch (wParam)
@@ -415,11 +391,9 @@ time_t getTime(const char *szKey, const char *szDef, char *szBuf, int iSize)
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-	if (FindWindow("airshipclass", NULL))
-	{
-		MessageBox(NULL, "Already runnning!", "Error", MB_OK);
-		return 0;
-	}
+	HWND hWnd = FindWindow("airshipclass", NULL);
+	if (hWnd)
+		PostMessage(hWnd, WM_CLOSE, 0, 0);
 
 	HMODULE hUser32Dll =::GetModuleHandle("user32.dll");
 	UpdateLayeredWindow = (PFN_UpdateLayeredWindow)::GetProcAddress(hUser32Dll, "UpdateLayeredWindow");
@@ -436,8 +410,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	PathRemoveFileSpec(szCurrentDir);
 	SetCurrentDirectory(szCurrentDir);
 
-	conf.image = getStr("image", "airship.png", g_szImage, MAX_PATH);
-	conf.link = getStr("link", "https://en.wikipedia.org/wiki/Airship", g_szLink, MAX_PATH);
 	conf.frames = getInt("frames", 2);
 	conf.speed = getInt("speed", 1);
 	conf.autoclose = getInt("autoclose", 0);
@@ -452,6 +424,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	conf.draggable = getInt("draggable", 1);
 	conf.animframes = getInt("animframes", 1);
 	conf.animtime = getInt("animtime", 250);
+
+	conf.image = getStr("image", "airship.png", g_szImage, MAX_PATH);
+	conf.link = getStr("link", "https://en.wikipedia.org/wiki/Airship", g_szLink, MAX_PATH);
 	conf.launch = getTime("launch", "2001-01-01 00:00:00", g_szBuf, MAX_PATH);
 	conf.expire = getTime("expire", "2024-01-01 00:00:00", g_szBuf, MAX_PATH);
 
@@ -466,7 +441,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	view.h = g_pImg->GetHeight() / conf.frames;
 	view.step = 1;
 	view.hOldDC = NULL;
-	view.frozen = false;
+	view.paused = true;
+	view.sleeping = true;
 	view.screensaver = false;
 	view.lockscreen = false;
 	view.frame = 0;
@@ -474,19 +450,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	view.sh = GetSystemMetrics(SM_CYSCREEN);
 	view.ms = GetTickCount();
 	view.frametime = view.ms;
-	view.starttime = view.ms;
-	view.paused = true;
+	view.starttime = -1;
 	view.x = view.sw / 2;
 	view.y = view.sh * (conf.top + (conf.bottom - conf.top) / 2) / 100;
 
-	MSG msg;
-	HWND hWnd;
 	WNDCLASS wc;
-
 	wc.style = CS_HREDRAW | CS_VREDRAW;
 	wc.lpfnWndProc = (WNDPROC) WndProc;
-	wc.hInstance = GetModuleHandle(NULL);
-	wc.hbrBackground = NULL;//(HBRUSH) (COLOR_WINDOW + 1);
+	wc.hInstance = hInstance;
+	wc.hbrBackground = NULL;
 	wc.lpszClassName = "airshipclass";
 	wc.hCursor = LoadCursor(NULL, IDC_HAND);
 	wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -495,6 +467,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.cbWndExtra = 0;
 
 	RegisterClass(&wc);
+
 	if (!(hWnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, wc.lpszClassName, wc.lpszClassName, WS_POPUP, 0, 0, view.w, view.h, NULL, NULL, wc.hInstance, NULL)))
 	{
 		MessageBox(NULL, "Could not create window", "Error", MB_OK);
@@ -511,10 +484,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		pWTSRegisterSessionNotification(hWnd, NOTIFY_FOR_THIS_SESSION);
 	::FreeLibrary(handle);
 
-	DelayedStart(conf.delay);
-
 	SetTimer(hWnd, 0, 0, NULL);
 
+	MSG msg;
 	while (GetMessage(&msg, NULL, 0, 0))
 	{
 		TranslateMessage(&msg);
