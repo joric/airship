@@ -1,7 +1,0 @@
-ver. 0.0.1 (jun 24) - initial version
-ver. 0.0.2 (jun 25) - animation, launch/expire dates, screensaver/logon events, autohide
-ver. 0.0.3 (jun 26) - fixed autohide feature (was mistakenly listed as autoclose)
-ver. 0.0.4 (jun 27) - fixed multiple instances case (no errors, just kills previous copy)
-ver. 0.0.5 (jun 28) - small code fixes, all airship2 files renamed back to airship
-ver. 0.0.6 (jun 29) - added autorun option, ported to oldschool C89 (6 kb uncompressed)
-ver. 0.0.7 (jun 30) - codestyle fixes, size optimization (e.g. 3362 bytes after mew11)
